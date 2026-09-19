@@ -1,16 +1,33 @@
 # Kredensial dan Kunci Keamanan (Paling Penting - Jangan di-upload!)
 firebase-credentials.json
+bridgea-*.json
+*.json.enc
+.gemini_key
 .env
+.env.*
+!.env.example
 
-# Cache Python
+# Virtual Environment & Dependensi Lokal
+venv/
+env/
+ENV/
+.venv/
+
+# Cache Python & Build
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.pytest_cache/
+.coverage
 
-# Upload Lokal
+# Upload & File Lokal
 static/uploads/
+*.log
 
-# Folder Konfigurasi Editor / IDE
+# Folder Konfigurasi Editor / IDE & OS
 .vscode/
 .idea/
 .gemini/
+.DS_Store
+Thumbs.db

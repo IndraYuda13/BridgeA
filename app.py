@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from google.cloud import translate_v2 as translate
 # pyrefly: ignore [missing-import]
 import google.generativeai as genai
+from openai import OpenAI
 import json
 import re
 import base64
@@ -55,17 +56,20 @@ except Exception as e:
     translate_client = None
 
 # Inisialisasi Firebase
+firebase_database_url = os.getenv('FIREBASE_DATABASE_URL', 'https://bridgesign-default-rtdb.firebaseio.com/')
+firebase_storage_bucket = os.getenv('FIREBASE_STORAGE_BUCKET', 'bridgesign.firebasestorage.app')
+
 if os.path.exists(credentials_path):
     cred = credentials.Certificate(credentials_path)
     firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://bridgesign-default-rtdb.firebaseio.com/',
-        'storageBucket': 'bridgesign.firebasestorage.app'
+        'databaseURL': firebase_database_url,
+        'storageBucket': firebase_storage_bucket
     })
 else:
     # Menggunakan Application Default Credentials (ADC) di server Google Cloud/Firebase
     firebase_admin.initialize_app(options={
-        'databaseURL': 'https://bridgesign-default-rtdb.firebaseio.com/',
-        'storageBucket': 'bridgesign.firebasestorage.app'
+        'databaseURL': firebase_database_url,
+        'storageBucket': firebase_storage_bucket
     })
 db = firebase_firestore.client()
 
@@ -130,12 +134,119 @@ def kirim_wa_fonnte(target, message):
         print(f"Error mengirim pesan Fonnte: {e}")
         return False, str(e)
 
-# Inisialisasi Gemini
+# Inisialisasi Gemini jika API key tersedia
 gemini_key = os.getenv('GEMINI_API_KEY')
 if gemini_key:
     genai.configure(api_key=gemini_key)
-else:
-    print("Peringatan: GEMINI_API_KEY tidak ditemukan!")
+
+# ==========================================
+# UNIFIED AI CLIENT (OpenAI & Gemini Fallback)
+# ==========================================
+
+class UnifiedAIResponse:
+    """Wrapper response seragam dengan atribut .text dan representasi string."""
+    def __init__(self, text=""):
+        self.text = text or ""
+
+    def __str__(self):
+        return self.text
+
+
+class UnifiedAIClient:
+    """
+    Arsitektur AI Terpadu & Tangguh (Multi-tier Fallback):
+    1. Primary: Library resmi OpenAI SDK (mendukung custom OPENAI_BASE_URL & OPENAI_MODEL).
+    2. Fallback: Google Gemini SDK jika GEMINI_API_KEY terkonfigurasi.
+    3. Failover: Exception dilempar agar endpoint mengeksekusi fungsi fallback manual bawaan.
+    """
+    def __init__(self, model=None):
+        self.openai_base_url = os.getenv('OPENAI_BASE_URL') or None
+        self.openai_api_key = os.getenv('OPENAI_API_KEY')
+        env_openai_model = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+        # Gunakan model kustom jika disediakan dan bukan string legacy gemini, selain itu pakai OPENAI_MODEL
+        self.openai_model = env_openai_model if (model is None or 'gemini' in str(model).lower()) else model
+        self.gemini_model = model if (model and 'gemini' in str(model).lower()) else os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
+        
+        try:
+            self.timeout = int(os.getenv('AI_TIMEOUT', '30'))
+        except (ValueError, TypeError):
+            self.timeout = 30
+
+    def generate_content(self, prompt, **kwargs):
+        """Metode serbaguna kompatibel dengan Gemini SDK & OpenAI."""
+        return self.generate(prompt, **kwargs)
+
+    def generate(self, prompt, **kwargs):
+        """Mengeksekusi generasi teks dengan proteksi failover berlapis."""
+        prompt_str = prompt if isinstance(prompt, str) else str(prompt)
+        last_error = None
+
+        # Tier 1: Official OpenAI SDK
+        if self.openai_api_key:
+            try:
+                client = OpenAI(
+                    api_key=self.openai_api_key,
+                    base_url=self.openai_base_url if self.openai_base_url else None,
+                    timeout=self.timeout
+                )
+                stream = kwargs.get('stream', False)
+                response = client.chat.completions.create(
+                    model=self.openai_model,
+                    messages=[
+                        {"role": "user", "content": prompt_str}
+                    ],
+                    stream=stream,
+                    timeout=self.timeout
+                )
+                
+                if stream:
+                    chunks = []
+                    for chunk in response:
+                        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                            chunks.append(chunk.choices[0].delta.content)
+                    content = "".join(chunks)
+                else:
+                    content = ""
+                    if response.choices and response.choices[0].message and response.choices[0].message.content:
+                        content = response.choices[0].message.content
+
+                if content:
+                    return UnifiedAIResponse(content)
+                raise RuntimeError("OpenAI mengembalikan respons kosong.")
+            except Exception as e_openai:
+                print(f"[UnifiedAIClient] OpenAI call gagal ({e_openai}), mengalihkan ke fallback...")
+                last_error = e_openai
+
+        # Tier 2: Google Gemini SDK Fallback
+        gemini_key = os.getenv('GEMINI_API_KEY')
+        if gemini_key:
+            try:
+                genai.configure(api_key=gemini_key)
+                model = genai.GenerativeModel(self.gemini_model)
+                req_opts = {"timeout": self.timeout}
+                if 'request_options' in kwargs:
+                    req_opts.update(kwargs.pop('request_options'))
+                resp = model.generate_content(prompt_str, request_options=req_opts, **kwargs)
+                if resp and hasattr(resp, 'text') and resp.text:
+                    return UnifiedAIResponse(resp.text)
+                raise RuntimeError("Gemini mengembalikan respons kosong.")
+            except Exception as e_gemini:
+                print(f"[UnifiedAIClient] Gemini fallback gagal ({e_gemini}).")
+                last_error = e_gemini
+
+        # Tier 3: Jika seluruh AI gagal / API key tidak ada, lemparkan error ke endpoint
+        error_msg = (
+            f"Semua penyedia AI gagal. Error terakhir: {last_error}"
+            if last_error
+            else "Tidak ada API key AI yang terkonfigurasi (OPENAI_API_KEY / GEMINI_API_KEY)."
+        )
+        raise RuntimeError(error_msg)
+
+
+# Alias untuk backward compatibility
+SafeAIClient = UnifiedAIClient
+SafeGenerativeModel = UnifiedAIClient
+SafeAIResponse = UnifiedAIResponse
 
 @aplikasi.before_request
 def batasi_akses():
@@ -1100,6 +1211,7 @@ def generate_manual_kata_fokus(kata, lang):
     }
 
 @aplikasi.route('/api/generate_kata_fokus', methods=['POST'])
+@aplikasi.route('/api/generate-kata-fokus', methods=['POST'])
 def api_generate_kata_fokus():
     data_masuk = request.json
     if not data_masuk or 'word' not in data_masuk:
@@ -1121,10 +1233,10 @@ def api_generate_kata_fokus():
             data_cache['cara'] = clean_cara.replace('-', '')
         return jsonify(data_cache)
         
-    # 2. Kalau belum ada, kita coba generate via AI Gemini terlebih dahulu (Dinamis)
+    # 2. Kalau belum ada, kita coba generate via AI terlebih dahulu (Dinamis: OpenAI -> Gemini)
     try:
         try:
-            mesin_ai = genai.GenerativeModel('gemini-2.5-flash')
+            mesin_ai = UnifiedAIClient()
             if lang == 'id':
                 perintah = f"""Tolong kasih penjelasan singkat kata bahasa Indonesia '{kata_dicari}' untuk anak SLB.
 Balas HANYA pakai format JSON, jangan ada teks lain.
@@ -1194,10 +1306,10 @@ Format JSON persis seperti ini:
                 # Simpan ke database
                 db.collection('kamus_kosakata').document(doc_id).set(data_jadi)
                 return jsonify(data_jadi)
-        except Exception as e_gemini:
-            print("API Gemini gagal/limit habis, menggunakan fallback manual untuk kata fokus:", e_gemini)
+        except Exception as e_ai:
+            print("API AI gagal/limit habis, menggunakan fallback manual untuk kata fokus:", e_ai)
             
-        # Fallback manual jika Gemini error
+        # Fallback manual jika AI error
         data_jadi = generate_manual_kata_fokus(kata_dicari, lang)
         db.collection('kamus_kosakata').document(doc_id).set(data_jadi)
         return jsonify(data_jadi)
@@ -1456,6 +1568,7 @@ def generate_manual_phonetics(teks, lang):
     return phonetics_array
 
 @aplikasi.route('/api/generate_phonetics_sentence', methods=['POST'])
+@aplikasi.route('/api/generate-phonetics-sentence', methods=['POST'])
 def api_generate_phonetics_sentence():
     data_masuk = request.json
     if not data_masuk or 'text' not in data_masuk:
@@ -1480,9 +1593,9 @@ def api_generate_phonetics_sentence():
                     item['phonetic'] = clean_phonetic.replace('-', '')
             return jsonify({'phonetics_array': phonetics_array})
 
-        # 2. Coba gunakan AI Gemini terlebih dahulu (Dinamis)
+        # 2. Coba gunakan AI terlebih dahulu (Dinamis: OpenAI -> Gemini)
         try:
-            mesin_ai = genai.GenerativeModel('gemini-2.5-flash')
+            mesin_ai = UnifiedAIClient()
             
             if lang == 'id':
                 perintah = f"""Tolong kelompokkan kalimat bahasa Indonesia berikut ke dalam frasa (bagian kalimat) yang bermakna, lalu berikan cara bacanya per frasa untuk anak SLB:
@@ -1530,10 +1643,10 @@ Contoh: "Hello how are you" menjadi:
                 # Simpan hasil AI ke Firestore
                 db.collection('kamus_kalimat').document(doc_id).set({'phonetics_array': data_array})
                 return jsonify({'phonetics_array': data_array})
-        except Exception as e_gemini:
-            print("API Gemini gagal/limit habis, menggunakan fallback manual untuk ejaan kalimat:", e_gemini)
+        except Exception as e_ai:
+            print("API AI gagal/limit habis, menggunakan fallback manual untuk ejaan kalimat:", e_ai)
 
-        # Fallback offline jika Gemini error
+        # Fallback offline jika AI error
         data_array = generate_manual_phonetics(teks, lang)
         db.collection('kamus_kalimat').document(doc_id).set({'phonetics_array': data_array})
         return jsonify({'phonetics_array': data_array})
@@ -1600,6 +1713,7 @@ def generate_manual_kuis_game(words, lang):
     return pertanyaan
 
 @aplikasi.route('/api/generate_kuis_game', methods=['POST'])
+@aplikasi.route('/api/generate-kuis-game', methods=['POST'])
 def api_generate_kuis_game():
     data_masuk = request.json
     if not data_masuk or 'words' not in data_masuk:
@@ -1611,9 +1725,9 @@ def api_generate_kuis_game():
         return jsonify({'error': 'Format kata harus berupa list/array'}), 400
         
     try:
-        # Coba gunakan AI Gemini terlebih dahulu (Dinamis)
+        # Coba gunakan AI terlebih dahulu (Dinamis: OpenAI -> Gemini)
         try:
-            mesin_ai = genai.GenerativeModel('gemini-2.5-flash')
+            mesin_ai = UnifiedAIClient()
             kata_str = ", ".join(daftar_kata)
             
             if lang == 'id':
@@ -1670,8 +1784,8 @@ Contoh format balasan:
                 teks_jawaban = teks_jawaban[awal:akhir+1]
                 data_array = json.loads(teks_jawaban)
                 return jsonify({'pertanyaan': data_array})
-        except Exception as e_gemini:
-            print("API Gemini gagal/limit habis, menggunakan fallback manual untuk kuis game:", e_gemini)
+        except Exception as e_ai:
+            print("API AI gagal/limit habis, menggunakan fallback manual untuk kuis game:", e_ai)
 
         # Generate latihan kuis secara offline manual (lebih cepat dan stabil)
         data_array = generate_manual_kuis_game(daftar_kata, lang)

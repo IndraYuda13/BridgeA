@@ -5,3 +5,4 @@ google-cloud-translate
 google-generativeai
 gunicorn
 requests
+openai>=1.0.0
