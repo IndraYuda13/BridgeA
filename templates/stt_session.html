@@ -757,6 +757,7 @@
         // Variabel untuk menyimpan status rekaman
         let mediaRecorder;
         let socket;
+        let recognition = null;
         
         const cachePhonetics = {};
         const cachePhoneticsPlain = {};
@@ -812,120 +813,296 @@
         // Panggil saat halaman pertama kali dimuat
         window.addEventListener('load', getMicrophones);
 
-        // Fungsi untuk memulai proses rekaman suara
-        async function mulaiRekaman() {
-            try {
-                // Minta izin ke browser untuk pakai mic laptop
-                const micId = document.getElementById('pilihMic').value;
-                const audioOptions = micId ? { deviceId: { exact: micId } } : true;
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: audioOptions });
+        // Fungsi untuk memulai Web Speech API (Browser Native Fallback)
+        function mulaiWebSpeech() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                alert('Browser Anda belum mendukung Web Speech API. Silakan gunakan browser Google Chrome atau Microsoft Edge.');
+                berhentiRekaman();
+                return;
+            }
 
-                // Siapkan alamat server web socket Deepgram
+            try {
+                if (recognition) {
+                    recognition.onend = null;
+                    try { recognition.abort(); } catch (e) {}
+                    recognition = null;
+                }
+
+                recognition = new SpeechRecognition();
+                recognition.continuous = true;
+                recognition.interimResults = true;
+
                 const opsiBahasaVal = document.getElementById('opsiBahasa').value;
                 const langModel = (opsiBahasaVal === 'en') ? 'en' : 'id';
-                const kataFokusSekarang = document.getElementById('pilihKataFokus').value;
-                // Build WebSocket URL without the access_token query param
-                // Mengubah endpointing ke 1500ms agar Deepgram mengirimkan data final lebih responsif
-                const linkWebsocket = `wss://api.deepgram.com/v1/listen?model=nova-2&language=${langModel}&smart_format=true&interim_results=true&endpointing=1500&vad_events=true&keywords=${encodeURIComponent(kataFokusSekarang)}:2`;
+                recognition.lang = (langModel === 'en') ? 'en-US' : 'id-ID';
 
-                // Hubungkan ke server Deepgram menggunakan subprotocol token (rekomendasi resmi untuk client-side browser)
-                socket = new WebSocket(linkWebsocket, ['token', DEEPGRAM_API_KEY]);
-
-                // Kalau koneksi sukses
-                socket.onopen = function () {
+                recognition.onstart = function () {
                     dotStatus.className = 'dot dot-hijau';
-                    teksStatus.textContent = 'Mic ON';
-
-                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-
-                    // Kirim data suara sedikit demi sedikit ke server
-                    mediaRecorder.ondataavailable = function (event) {
-                        if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
-                            socket.send(event.data);
-                        }
-                    };
-
-                    mediaRecorder.start(250);
+                    teksStatus.textContent = 'Mic ON (Web Speech)';
                 };
 
-                // Saat dapat balasan teks terjemahan dari server Deepgram
-                socket.onmessage = async function (pesan) {
-                    const data = JSON.parse(pesan.data);
+                recognition.onspeechstart = function () {
+                    teksStatus.textContent = 'Ada Suara...';
+                    dotStatus.style.boxShadow = '0 0 10px #22c55e';
+                };
 
-                    // Cek kalau user lagi ngomong atau diam
-                    if (data.type === 'SpeechStarted') {
-                        teksStatus.textContent = 'Ada Suara...';
-                        dotStatus.style.boxShadow = '0 0 10px #22c55e';
-                        return;
-                    } else if (data.type === 'SpeechFinished') {
-                        teksStatus.textContent = 'Hening';
-                        dotStatus.style.boxShadow = 'none';
-                        return;
+                recognition.onspeechend = function () {
+                    teksStatus.textContent = 'Hening';
+                    dotStatus.style.boxShadow = 'none';
+                };
+
+                recognition.onerror = function (event) {
+                    console.warn('Web Speech API error:', event.error);
+                    if (event.error === 'not-allowed') {
+                        alert('Akses mikrofon ditolak di browser. Tolong izinkan akses mikrofon ya!');
+                        berhentiRekaman();
+                    } else if (event.error === 'audio-capture') {
+                        alert('Mikrofon tidak ditemukan atau tidak dapat diakses.');
+                        berhentiRekaman();
+                    }
+                    // Error non-kritis lainnya (no-speech, aborted, network dsb) ditangani tanpa crash
+                };
+
+                recognition.onend = function () {
+                    if (lagiRekam) {
+                        setTimeout(() => {
+                            if (lagiRekam && recognition) {
+                                try {
+                                    const modeVal = document.getElementById('opsiBahasa').value;
+                                    const curLang = (modeVal === 'en') ? 'en' : 'id';
+                                    recognition.lang = (curLang === 'en') ? 'en-US' : 'id-ID';
+                                    recognition.start();
+                                } catch (err) {
+                                    console.log('Restart recognition error:', err);
+                                }
+                            }
+                        }, 100);
+                    }
+                };
+
+                recognition.onresult = function (event) {
+                    let interimTranscript = '';
+                    let finalTranscript = '';
+
+                    for (let i = event.resultIndex; i < event.results.length; ++i) {
+                        const item = event.results[i];
+                        if (item.isFinal) {
+                            finalTranscript += item[0].transcript;
+                        } else {
+                            interimTranscript += item[0].transcript;
+                        }
                     }
 
-                    // Ambil teks hasil ucapan dengan cara aman (tanpa kode ribet AI)
-                    let teksUcapan = '';
-                    if (data.channel && data.channel.alternatives && data.channel.alternatives[0]) {
-                        teksUcapan = data.channel.alternatives[0].transcript;
-                    }
+                    const modeSekarang = document.getElementById('opsiBahasa').value;
 
-
-                    if (teksUcapan != '') {
-                        // Bersihkan timer pemrosesan kalimat jika user sedang berbicara (baik final maupun interim)
-                        // Agar pemrosesan terjemahan tidak berjalan sebelum user benar-benar diam selama 5 detik
+                    // Jika ada transcript final
+                    if (finalTranscript.trim() !== '') {
                         clearTimeout(timerJedaKalimat);
+                        kalimatGabungan += " " + finalTranscript.trim();
+                        kalimatGabungan = kalimatGabungan.trim();
 
-                        // Dapatkan teks gabungan yang sudah final + teks baru (baik final maupun interim)
-                        const teksLengkapRealtime = (kalimatGabungan ? kalimatGabungan + ' ' : '') + teksUcapan.trim();
+                        if (modeSekarang === 'id-en') {
+                            teksIndonesian.innerHTML = '= ' + kalimatGabungan;
+                        } else {
+                            teksEnglish.innerHTML = kalimatGabungan;
+                        }
 
-                        // --- TAMBAHAN BARU: Kirim teks realtime (paragraf panjang mengalir) ke API Firebase ---
+                        const teksLengkapRealtime = (kalimatGabungan ? kalimatGabungan + ' ' : '') + interimTranscript.trim();
+                        fetch('/api/update_teks_realtime', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ teks: teksLengkapRealtime.trim() })
+                        }).catch(err => console.log('Gagal update Firebase RTDB', err));
+
+                        timerJedaKalimat = setTimeout(() => {
+                            prosesKalimatSelesai(kalimatGabungan);
+                            kalimatGabungan = "";
+                        }, 5000);
+                    }
+
+                    // Jika ada transcript interim (sedang berbicara)
+                    if (interimTranscript.trim() !== '') {
+                        clearTimeout(timerJedaKalimat);
+                        const teksLengkapRealtime = (kalimatGabungan ? kalimatGabungan + ' ' : '') + interimTranscript.trim();
+
                         fetch('/api/update_teks_realtime', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ teks: teksLengkapRealtime })
                         }).catch(err => console.log('Gagal update Firebase RTDB', err));
-                        // -----------------------------------------------------------
-                        
-                        const modeSekarang = document.getElementById('opsiBahasa').value;
 
-                        // Kalau ucapannya sudah selesai dari sisi chunk
-                        if (data.is_final) {
-                            kalimatGabungan += " " + teksUcapan.trim();
-                            kalimatGabungan = kalimatGabungan.trim();
-                            
-                            // Tampilkan teks utuh sementara di layar (warna teks utama)
-                            if (modeSekarang === 'id-en') {
-                                teksIndonesian.innerHTML = '= ' + kalimatGabungan;
-                            } else {
-                                teksEnglish.innerHTML = kalimatGabungan;
-                            }
-
-                            // Tunggu 5 detik benar-benar hening setelah ucapan final terakhir sebelum memproses terjemahan & riwayat
-                            timerJedaKalimat = setTimeout(() => {
-                                prosesKalimatSelesai(kalimatGabungan);
-                                kalimatGabungan = ""; // Reset untuk kalimat berikutnya
-                            }, 5000);
+                        if (modeSekarang === 'id-en') {
+                            teksIndonesian.innerHTML = '= ' + (kalimatGabungan ? kalimatGabungan + ' ' : '') + '<span style="color: #9ca3af;">' + interimTranscript.trim() + '</span>';
                         } else {
-                            // Tampilkan teks final yang sudah terkumpul + kata baru yang sedang diucapkan (interim berwarna abu-abu)
-                            // Ini membuat teks mengalir panjang seperti paragraf dan tidak terpotong-potong / berkedip
-                            if (modeSekarang === 'id-en') {
-                                teksIndonesian.innerHTML = '= ' + (kalimatGabungan ? kalimatGabungan + ' ' : '') + '<span style="color: #9ca3af;">' + teksUcapan + '</span>';
-                            } else {
-                                teksEnglish.innerHTML = (kalimatGabungan ? kalimatGabungan + ' ' : '') + '<span style="color: #9ca3af;">' + teksUcapan + '</span>';
-                                teksIndonesian.innerHTML = '';
-                            }
+                            teksEnglish.innerHTML = (kalimatGabungan ? kalimatGabungan + ' ' : '') + '<span style="color: #9ca3af;">' + interimTranscript.trim() + '</span>';
+                            teksIndonesian.innerHTML = '';
                         }
                     }
                 };
 
-                socket.onerror = function () {
-                    alert('Gagal terhubung ke server suara');
-                    berhentiRekaman();
-                };
+                recognition.start();
 
-            } catch (error) {
-                alert('Tolong izinkan akses mikrofon di browser Anda ya!');
+            } catch (err) {
+                console.warn('Gagal memulai Web Speech API:', err);
                 berhentiRekaman();
+            }
+        }
+
+        // Fungsi untuk memulai proses rekaman suara
+        async function mulaiRekaman() {
+            if (DEEPGRAM_API_KEY) {
+                let deepgramConnected = false;
+                let deepgramFallbackDone = false;
+
+                function fallbackKeWebSpeech() {
+                    if (deepgramFallbackDone) return;
+                    deepgramFallbackDone = true;
+                    console.warn('Gagal terhubung ke Deepgram, otomatis beralih ke Web Speech API...');
+
+                    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                        try { mediaRecorder.stop(); } catch (e) {}
+                    }
+                    if (mediaRecorder && mediaRecorder.stream) {
+                        try {
+                            mediaRecorder.stream.getTracks().forEach(t => t.stop());
+                        } catch (e) {}
+                    }
+                    if (socket) {
+                        try { socket.close(); } catch (e) {}
+                        socket = null;
+                    }
+
+                    mulaiWebSpeech();
+                }
+
+                try {
+                    // Minta izin ke browser untuk pakai mic laptop
+                    const micId = document.getElementById('pilihMic').value;
+                    const audioOptions = micId ? { deviceId: { exact: micId } } : true;
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: audioOptions });
+
+                    // Siapkan alamat server web socket Deepgram
+                    const opsiBahasaVal = document.getElementById('opsiBahasa').value;
+                    const langModel = (opsiBahasaVal === 'en') ? 'en' : 'id';
+                    const kataFokusSekarang = document.getElementById('pilihKataFokus').value;
+                    // Build WebSocket URL without the access_token query param
+                    // Mengubah endpointing ke 1500ms agar Deepgram mengirimkan data final lebih responsif
+                    const linkWebsocket = `wss://api.deepgram.com/v1/listen?model=nova-2&language=${langModel}&smart_format=true&interim_results=true&endpointing=1500&vad_events=true&keywords=${encodeURIComponent(kataFokusSekarang)}:2`;
+
+                    // Hubungkan ke server Deepgram menggunakan subprotocol token (rekomendasi resmi untuk client-side browser)
+                    socket = new WebSocket(linkWebsocket, ['token', DEEPGRAM_API_KEY]);
+
+                    // Kalau koneksi sukses
+                    socket.onopen = function () {
+                        deepgramConnected = true;
+                        dotStatus.className = 'dot dot-hijau';
+                        teksStatus.textContent = 'Mic ON';
+
+                        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+
+                        // Kirim data suara sedikit demi sedikit ke server
+                        mediaRecorder.ondataavailable = function (event) {
+                            if (event.data.size > 0 && socket && socket.readyState === WebSocket.OPEN) {
+                                socket.send(event.data);
+                            }
+                        };
+
+                        mediaRecorder.start(250);
+                    };
+
+                    // Saat dapat balasan teks terjemahan dari server Deepgram
+                    socket.onmessage = async function (pesan) {
+                        const data = JSON.parse(pesan.data);
+
+                        // Cek kalau user lagi ngomong atau diam
+                        if (data.type === 'SpeechStarted') {
+                            teksStatus.textContent = 'Ada Suara...';
+                            dotStatus.style.boxShadow = '0 0 10px #22c55e';
+                            return;
+                        } else if (data.type === 'SpeechFinished') {
+                            teksStatus.textContent = 'Hening';
+                            dotStatus.style.boxShadow = 'none';
+                            return;
+                        }
+
+                        // Ambil teks hasil ucapan dengan cara aman (tanpa kode ribet AI)
+                        let teksUcapan = '';
+                        if (data.channel && data.channel.alternatives && data.channel.alternatives[0]) {
+                            teksUcapan = data.channel.alternatives[0].transcript;
+                        }
+
+
+                        if (teksUcapan != '') {
+                            // Bersihkan timer pemrosesan kalimat jika user sedang berbicara (baik final maupun interim)
+                            // Agar pemrosesan terjemahan tidak berjalan sebelum user benar-benar diam selama 5 detik
+                            clearTimeout(timerJedaKalimat);
+
+                            // Dapatkan teks gabungan yang sudah final + teks baru (baik final maupun interim)
+                            const teksLengkapRealtime = (kalimatGabungan ? kalimatGabungan + ' ' : '') + teksUcapan.trim();
+
+                            // --- TAMBAHAN BARU: Kirim teks realtime (paragraf panjang mengalir) ke API Firebase ---
+                            fetch('/api/update_teks_realtime', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ teks: teksLengkapRealtime })
+                            }).catch(err => console.log('Gagal update Firebase RTDB', err));
+                            // -----------------------------------------------------------
+                            
+                            const modeSekarang = document.getElementById('opsiBahasa').value;
+
+                            // Kalau ucapannya sudah selesai dari sisi chunk
+                            if (data.is_final) {
+                                kalimatGabungan += " " + teksUcapan.trim();
+                                kalimatGabungan = kalimatGabungan.trim();
+                                
+                                // Tampilkan teks utuh sementara di layar (warna teks utama)
+                                if (modeSekarang === 'id-en') {
+                                    teksIndonesian.innerHTML = '= ' + kalimatGabungan;
+                                } else {
+                                    teksEnglish.innerHTML = kalimatGabungan;
+                                }
+
+                                // Tunggu 5 detik benar-benar hening setelah ucapan final terakhir sebelum memproses terjemahan & riwayat
+                                timerJedaKalimat = setTimeout(() => {
+                                    prosesKalimatSelesai(kalimatGabungan);
+                                    kalimatGabungan = ""; // Reset untuk kalimat berikutnya
+                                }, 5000);
+                            } else {
+                                // Tampilkan teks final yang sudah terkumpul + kata baru yang sedang diucapkan (interim berwarna abu-abu)
+                                // Ini membuat teks mengalir panjang seperti paragraf dan tidak terpotong-potong / berkedip
+                                if (modeSekarang === 'id-en') {
+                                    teksIndonesian.innerHTML = '= ' + (kalimatGabungan ? kalimatGabungan + ' ' : '') + '<span style="color: #9ca3af;">' + teksUcapan + '</span>';
+                                } else {
+                                    teksEnglish.innerHTML = (kalimatGabungan ? kalimatGabungan + ' ' : '') + '<span style="color: #9ca3af;">' + teksUcapan + '</span>';
+                                    teksIndonesian.innerHTML = '';
+                                }
+                            }
+                        }
+                    };
+
+                    socket.onerror = function (err) {
+                        fallbackKeWebSpeech();
+                    };
+
+                    socket.onclose = function (evt) {
+                        if (!deepgramConnected && lagiRekam) {
+                            fallbackKeWebSpeech();
+                        }
+                    };
+
+                } catch (error) {
+                    if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                        alert('Tolong izinkan akses mikrofon di browser Anda ya!');
+                        berhentiRekaman();
+                    } else {
+                        console.warn('Gagal inisialisasi mic/Deepgram, fallback ke Web Speech API:', error);
+                        fallbackKeWebSpeech();
+                    }
+                }
+            } else {
+                // DEEPGRAM_API_KEY kosong, langsung gunakan Web Speech API
+                mulaiWebSpeech();
             }
         }
 
@@ -1153,19 +1330,43 @@
 
         // Fungsi untuk mematikan mic dan putus koneksi
         function berhentiRekaman() {
-            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                mediaRecorder.stop();
-                // Matikan semua fungsi mic
-                const tracks = mediaRecorder.stream.getTracks();
-                for (let i = 0; i < tracks.length; i++) {
-                    tracks[i].stop();
-                }
+            lagiRekam = false;
+
+            if (recognition) {
+                recognition.onend = null;
+                try {
+                    recognition.stop();
+                } catch (e) {}
+                recognition = null;
             }
+
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                try {
+                    mediaRecorder.stop();
+                } catch (e) {}
+            }
+
+            if (mediaRecorder && mediaRecorder.stream) {
+                try {
+                    const tracks = mediaRecorder.stream.getTracks();
+                    for (let i = 0; i < tracks.length; i++) {
+                        tracks[i].stop();
+                    }
+                } catch (e) {}
+            }
+
             if (socket) {
-                socket.close();
+                try {
+                    socket.close();
+                } catch (e) {}
+                socket = null;
             }
 
             // Kembalikan tampilan tombol ke awal
+            btnRekam.className = 'btn btn-biru';
+            ikonRekam.className = 'ph ph-microphone';
+            teksRekam.textContent = 'Mulai';
+
             dotStatus.className = 'dot dot-abu';
             dotStatus.style.boxShadow = 'none';
             teksStatus.textContent = 'Mic OFF';
@@ -1174,8 +1375,9 @@
         // Aksi saat tombol "Mulai Rekam" dipencet
         btnRekam.addEventListener('click', function () {
             if (lagiRekam == false) {
-                if (!DEEPGRAM_API_KEY) {
-                    alert('API Key belum diisi!');
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!DEEPGRAM_API_KEY && !SpeechRecognition) {
+                    alert('Browser Anda belum mendukung Web Speech API dan API Key Deepgram belum diisi. Silakan gunakan Google Chrome / Microsoft Edge atau isi DEEPGRAM_API_KEY di pengaturan .env.');
                     return;
                 }
 
@@ -1190,12 +1392,16 @@
                 mulaiRekaman();
 
             } else {
-                lagiRekam = false;
-                btnRekam.className = 'btn btn-biru';
-                ikonRekam.className = 'ph ph-microphone';
-                teksRekam.textContent = 'Mulai';
-
                 berhentiRekaman();
+            }
+        });
+
+        // Jika opsi bahasa diganti saat Web Speech aktif, restart recognition dengan bahasa baru
+        document.getElementById('opsiBahasa').addEventListener('change', function () {
+            if (lagiRekam && recognition) {
+                try {
+                    recognition.stop();
+                } catch (e) {}
             }
         });
 

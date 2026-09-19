@@ -28,16 +28,29 @@
                 </div>
                 
                 <!-- Detail Kelas -->
-                <div style="display: flex; flex-direction: column; gap: 0.3rem;">
-                    <span style="font-size: 0.9rem; color: #64748b;">{{ kelas.jadwal_hari }}</span>
+                <div style="display: flex; flex-direction: column; gap: 0.35rem;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                        <span style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 500; color: #475569;">
+                            <i class="ph ph-calendar-blank" style="color: #2563eb; font-size: 1rem;"></i>
+                            {{ kelas.jadwal_hari }}
+                        </span>
+                        {% if kelas.jadwal_hari == hari_ini or kelas.jadwal_hari|lower in ['sabtu', 'hari ini', 'setiap hari', '24 jam'] or 'sabtu' in kelas.jadwal_hari|lower %}
+                        <span style="background-color: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; font-size: 0.75rem; font-weight: 600; padding: 0.1rem 0.5rem; border-radius: 9999px; display: inline-flex; align-items: center; gap: 0.25rem;">
+                            <span style="width: 6px; height: 6px; border-radius: 50%; background-color: #2563eb;"></span> Sesuai Jadwal
+                        </span>
+                        {% endif %}
+                    </div>
                     <span style="font-size: 1.15rem; font-weight: 700; color: #1e293b;">{{ kelas.nama_kelas }}</span>
-                    <span style="font-size: 0.9rem; color: #475569;">{{ kelas.jadwal_waktu_mulai }} - {{ kelas.jadwal_waktu_selesai }}</span>
+                    <span style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: #64748b;">
+                        <i class="ph ph-clock" style="color: #64748b; font-size: 1rem;"></i>
+                        {{ kelas.jadwal_waktu_mulai }} - {{ kelas.jadwal_waktu_selesai }}
+                    </span>
                 </div>
             </div>
             
             <!-- Bagian Kanan (Tombol Mulai) -->
             <div>
-                {% if kelas.jadwal_hari == hari_ini %}
+                {% if kelas.jadwal_hari == hari_ini or kelas.jadwal_hari|lower in ['sabtu', 'hari ini', 'setiap hari', '24 jam'] or 'sabtu' in kelas.jadwal_hari|lower %}
                 <a href="{{ url_for('sesi_stt', nama_kelas=kelas.nama_kelas) }}" style="display: inline-flex; align-items: center; gap: 0.5rem; background-color: #2563eb; color: white; padding: 0.7rem 1.5rem; border-radius: 6px; font-weight: 600; font-size: 0.95rem; text-decoration: none; transition: background-color 0.2s; box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2);">
                     <i class="ph-fill ph-play" style="font-size: 1.1rem;"></i> Mulai Sesi Mengajar
                 </a>
