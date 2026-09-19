@@ -882,62 +882,62 @@
                 };
 
                 recognition.onresult = function (event) {
+                    clearTimeout(timerJedaKalimat);
+
                     let interimTranscript = '';
                     let finalTranscript = '';
 
-                    for (let i = event.resultIndex; i < event.results.length; ++i) {
-                        const item = event.results[i];
-                        if (item.isFinal) {
-                            finalTranscript += item[0].transcript;
+                    for (let i = 0; i < event.results.length; ++i) {
+                        if (event.results[i].isFinal) {
+                            finalTranscript += event.results[i][0].transcript + ' ';
                         } else {
-                            interimTranscript += item[0].transcript;
+                            interimTranscript += event.results[i][0].transcript;
                         }
+                    }
+                    finalTranscript = finalTranscript.trim();
+                    interimTranscript = interimTranscript.trim();
+                    const teksLengkap = (finalTranscript ? finalTranscript + ' ' : '') + interimTranscript;
+
+                    if (teksLengkap.trim() !== '') {
+                        fetch('/api/update_teks_realtime', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ teks: teksLengkap.trim() })
+                        }).catch(err => console.log('Gagal update Firebase RTDB', err));
                     }
 
                     const modeSekarang = document.getElementById('opsiBahasa').value;
 
-                    // Jika ada transcript final
-                    if (finalTranscript.trim() !== '') {
-                        clearTimeout(timerJedaKalimat);
-                        kalimatGabungan += " " + finalTranscript.trim();
-                        kalimatGabungan = kalimatGabungan.trim();
-
-                        if (modeSekarang === 'id-en') {
-                            teksIndonesian.innerHTML = '= ' + kalimatGabungan;
-                        } else {
-                            teksEnglish.innerHTML = kalimatGabungan;
-                        }
-
-                        const teksLengkapRealtime = (kalimatGabungan ? kalimatGabungan + ' ' : '') + interimTranscript.trim();
-                        fetch('/api/update_teks_realtime', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ teks: teksLengkapRealtime.trim() })
-                        }).catch(err => console.log('Gagal update Firebase RTDB', err));
-
-                        timerJedaKalimat = setTimeout(() => {
-                            prosesKalimatSelesai(kalimatGabungan);
-                            kalimatGabungan = "";
-                        }, 5000);
+                    let htmlTampilan = '';
+                    if (finalTranscript) {
+                        htmlTampilan += finalTranscript;
+                    }
+                    if (interimTranscript) {
+                        if (htmlTampilan) htmlTampilan += ' ';
+                        htmlTampilan += '<span style="color: #9ca3af;">' + interimTranscript + '</span>';
                     }
 
-                    // Jika ada transcript interim (sedang berbicara)
-                    if (interimTranscript.trim() !== '') {
-                        clearTimeout(timerJedaKalimat);
-                        const teksLengkapRealtime = (kalimatGabungan ? kalimatGabungan + ' ' : '') + interimTranscript.trim();
-
-                        fetch('/api/update_teks_realtime', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ teks: teksLengkapRealtime })
-                        }).catch(err => console.log('Gagal update Firebase RTDB', err));
-
+                    if (htmlTampilan) {
                         if (modeSekarang === 'id-en') {
-                            teksIndonesian.innerHTML = '= ' + (kalimatGabungan ? kalimatGabungan + ' ' : '') + '<span style="color: #9ca3af;">' + interimTranscript.trim() + '</span>';
+                            teksIndonesian.innerHTML = '= ' + htmlTampilan;
                         } else {
-                            teksEnglish.innerHTML = (kalimatGabungan ? kalimatGabungan + ' ' : '') + '<span style="color: #9ca3af;">' + interimTranscript.trim() + '</span>';
+                            teksEnglish.innerHTML = htmlTampilan;
                             teksIndonesian.innerHTML = '';
                         }
+                    }
+
+                    if (finalTranscript !== '') {
+                        timerJedaKalimat = setTimeout(() => {
+                            if (!lagiRekam) return;
+                            prosesKalimatSelesai(finalTranscript);
+                            if (recognition) {
+                                try {
+                                    recognition.stop();
+                                } catch (e) {
+                                    console.log('Error reset recognition:', e);
+                                }
+                            }
+                        }, 4000);
                     }
                 };
 
@@ -1331,6 +1331,8 @@
         // Fungsi untuk mematikan mic dan putus koneksi
         function berhentiRekaman() {
             lagiRekam = false;
+            clearTimeout(timerJedaKalimat);
+            kalimatGabungan = "";
 
             if (recognition) {
                 recognition.onend = null;
