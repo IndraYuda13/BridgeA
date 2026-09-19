@@ -7,6 +7,18 @@ bridgea-*.json
 .env.*
 !.env.example
 
+# Internal Documentation & Agent Directives
+walk-through.md
+walkthrough.md
+walk-through.*
+walkthrough.*
+improvement.md
+improvement.*
+AGENTS.md
+agents.md
+AGENTS.*
+agents.*
+
 # Virtual Environment & Dependensi Lokal
 venv/
 env/
